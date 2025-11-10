@@ -183,7 +183,7 @@ async def pinger_task():
         except Exception as e:
             logger.error(f"❌ Ошибка пинга сайта: {e}")
         # Ждем 5 минут (300 секунд). Render рекомендует пинговать чаще, чем раз в 14 минут.
-        await asyncio.sleep(300)
+        await asyncio.sleep(240)
 
 # <<< ИЗМЕНЕНО: Обновленная главная функция
 async def main():
