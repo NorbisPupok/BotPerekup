@@ -9,7 +9,6 @@ from telegram.ext import (Application, CommandHandler, MessageHandler, filters,
 from dotenv import load_dotenv
 
 # --- НАСТРОЙКА И КОНСТАНТЫ ---
-load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHANNEL_CHAT_ID = int(os.getenv("CHANNEL_CHAT_ID"))
 WEBSITE_API_URL = os.getenv("WEBSITE_API_URL", "http://localhost:3001")
