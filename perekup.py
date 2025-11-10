@@ -1,6 +1,8 @@
 import logging
 import os
 import httpx
+import asyncio  # <<< НОВОЕ: Импортируем asyncio для параллельного запуска
+from aiohttp import web  # <<< НОВОЕ: Импортируем веб-сервер
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (Application, CommandHandler, MessageHandler, filters,
                           ConversationHandler, ContextTypes, CallbackQueryHandler)
@@ -9,7 +11,7 @@ from dotenv import load_dotenv
 # --- НАСТРОЙКА И КОНСТАНТЫ ---
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHANNEL_CHAT_ID = int(os.getenv("CHANNEL_CHAT_ID"))  # Все еще нужен для публикации в канал
+CHANNEL_CHAT_ID = int(os.getenv("CHANNEL_CHAT_ID"))
 WEBSITE_API_URL = os.getenv("WEBSITE_API_URL", "http://localhost:3001")
 WEB_API_KEY = os.getenv("WEB_API_KEY")
 
@@ -37,7 +39,7 @@ async def send_to_website(data: dict):
             url = f"{WEBSITE_API_URL}/api/submissions"
             response = await client.post(url, json=data, headers={"Authorization": f"Bearer {WEB_API_KEY}"})
 
-            if response.status_code == 201:  # 201 - статус "Created"
+            if response.status_code == 201:
                 logger.info(f"Заявка от пользователя {data['user_name']} успешно отправлена на сайт.")
                 return True
             else:
@@ -64,14 +66,11 @@ async def submit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    photo = update.message.photo[-1]  # Берем фото самого большого размера
+    photo = update.message.photo[-1]
     photo_file_id = photo.file_id
-
     file_object = await context.bot.get_file(photo_file_id)
-
     context.user_data['photo_file_id'] = photo_file_id
     context.user_data['file_path'] = file_object.file_path
-
     await update.message.reply_text("Теперь напишите название сервера.")
     return SERVER_SELECTION
 
@@ -121,7 +120,6 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if query.data == 'confirm_submit':
         user = update.effective_user
-
         submission_data = {
             "user_id": user.id,
             "user_name": user.full_name,
@@ -132,7 +130,6 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
             "price": context.user_data['price']
         }
 
-        # Отправляем данные на сайт и ЖДЕМ МОДЕРАЦИИ
         success = await send_to_website(submission_data)
 
         if success:
@@ -149,7 +146,6 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
 
     elif query.data == 'restart_submit':
-        # ... (код не меняется)
         context.user_data.clear()
         await query.edit_message_caption(caption="Хорошо, давайте начнем заново.", reply_markup=None)
         await query.message.reply_text("📸 Отлично! Для начала, отправьте мне фотографию покупки",
@@ -163,7 +159,19 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
-def main() -> None:
+# <<< НОВОЕ: Функция для проверки здоровья (health check)
+async def health_check(request: web.Request):
+    """
+    Простая функция, которая отвечает "OK" на запросы от Render.
+    Это нужно, чтобы Render не перезапускал наш сервис.
+    """
+    return web.Response(text="OK")
+
+
+# <<< ИЗМЕНЕНО: Новая главная функция для запуска всего вместе
+async def main():
+    """Главная функция для запуска бота и веб-сервера."""
+    # --- 1. Настройка и запуск бота ---
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     start_handler = CommandHandler('start', start)
@@ -187,9 +195,33 @@ def main() -> None:
     application.add_handler(start_handler)
     application.add_handler(conv_handler_user)
 
-    print("✅ Бот запускается...")
-    application.run_polling()
+    # Запускаем бота в фоновом режиме
+    await application.initialize()
+    await application.start()
+    # `run_polling` - блокирующая операция, поэтому мы запускаем ее как задачу
+    bot_task = asyncio.create_task(application.updater.start_polling(drop_pending_updates=True))
+    print("✅ Бот запускается в фоновом режиме...")
+
+    # --- 2. Настройка и запуск веб-сервера ---
+    app = web.Application()
+    # Добавляем наш "health check" маршрут
+    app.router.add_get("/", health_check)
+
+    # Render устанавливает порт через переменную окружения PORT
+    port = int(os.environ.get('PORT', 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"✅ Веб-сервер для health-check запущен на порту {port}")
+
+    # --- 3. Держим программу работающей ---
+    # Ждем вечно, пока одна из задач не завершится (что не должно произойти)
+    await bot_task
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("⏹️ Бот остановлен.")
