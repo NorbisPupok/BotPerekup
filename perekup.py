@@ -168,11 +168,30 @@ async def health_check(request: web.Request):
 
 
 # <<< ИЗМЕНЕНО: Новая главная функция для запуска всего вместе
+async def pinger_task():
+    """
+    Фоновая задача, которая пингует САЙТ, чтобы он не "засыпал" на Render.
+    """
+    # URL вашего сайта, который нужно пинговать
+    website_url = "https://webperekupmini.onrender.com"
+    logger.info(f"🔄 Запущен пингер. Буду пинговать сайт {website_url} каждые 5 минут.")
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(website_url)
+                logger.info(f"✅ Успешный пинг сайта. Статус: {response.status_code}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка пинга сайта: {e}")
+        # Ждем 5 минут (300 секунд). Render рекомендует пинговать чаще, чем раз в 14 минут.
+        await asyncio.sleep(300)
+
+# <<< ИЗМЕНЕНО: Обновленная главная функция
 async def main():
-    """Главная функция для запуска бота и веб-сервера."""
+    """Главная функция для запуска бота, веб-сервера и пингера."""
     # --- 1. Настройка и запуск бота ---
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    # ... (ваши обработчики start, conv_handler_user и т.д. остаются без изменений)
     start_handler = CommandHandler('start', start)
     cancel_handler = CommandHandler('cancel', cancel)
 
@@ -194,31 +213,60 @@ async def main():
     application.add_handler(start_handler)
     application.add_handler(conv_handler_user)
 
-    # Запускаем бота в фоновом режиме
     await application.initialize()
     await application.start()
-    # `run_polling` - блокирующая операция, поэтому мы запускаем ее как задачу
     asyncio.create_task(application.updater.start_polling(drop_pending_updates=True))
     print("✅ Бот запускается в фоновом режиме...")
 
     # --- 2. Настройка и запуск веб-сервера ---
     app = web.Application()
-    # Добавляем наш "health check" маршрут
     app.router.add_get("/", health_check)
+    app.router.add_get("/api/photo/{file_path}", proxy_photo)
 
-    # Render устанавливает порт через переменную окружения PORT
     port = int(os.environ.get('PORT', 8080))
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"✅ Веб-сервер для health-check запущен на порту {port}")
+    print(f"✅ Веб-сервер для API запущен на порту {port}")
 
-    # --- 3. Держим программу работающей НАВСЕГДА ---
-    # Ждем вечно. Это более надежный способ, чем ожидать завершения задачи бота.
-    print("🚀 Все сервисы запущены. Бот готов к работе.")
+    # <<< НОВОЕ: Запускаем пингер сайта как фоновую задачу
+    asyncio.create_task(pinger_task())
+
+    # --- 3. Держим программу работающей ---
+    print("🚀 Все сервисы запущены. Бот готов к работе и будет пинговать сайт.")
     await asyncio.Event().wait()
 
+async def proxy_photo(request: web.Request):
+    """
+    Получает file_path, скачивает картинку с серверов Telegram
+    и отдает ее пользователю. Это скрывает токен бота от клиента.
+    """
+    # 1. Получаем путь к файлу из URL (например, "photos/file_10.jpg")
+    file_path = request.match_info.get('file_path')
+    if not file_path:
+        return web.Response(status=400, text="Ошибка: не указан путь к файлу (file_path).")
+
+    # 2. Формируем полный URL для скачивания картинки с серверов Telegram
+    # Используем ваш секретный токен, который хранится в переменных окружения
+    telegram_file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+
+    try:
+        # 3. Скачиваем картинку с сервера Telegram
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(telegram_file_url)
+            response.raise_for_status()  # Если Telegram вернул ошибку (404, 500), мы тоже вернем ошибку
+
+            # 4. Определяем тип файла (jpg, png и т.д.) и отдаем картинку сайту
+            content_type = response.headers.get('Content-Type', 'image/jpeg')
+            return web.Response(body=response.content, content_type=content_type)
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Не удалось скачать фото из Telegram: {e}")
+        return web.Response(status=e.response.status_code, text=f"Ошибка API Telegram: {e.response.status_code}")
+    except Exception as e:
+        logger.error(f"Внутренняя ошибка в proxy_photo: {e}")
+        return web.Response(status=500, text="Внутренняя ошибка сервера")
 
 if __name__ == '__main__':
     try:
